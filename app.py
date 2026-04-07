@@ -12,7 +12,7 @@ import time
 from datetime import datetime, timezone, timedelta
 from collections import defaultdict
 
-app = Flask(__name__)
+app = Flask(__name__, static_folder='static', static_url_path='')
 CORS(app)
 
 BASE_URL = "https://nzbembalagens.digisac.chat/api/v1"
