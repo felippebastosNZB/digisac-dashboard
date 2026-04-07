@@ -1,13 +1,9 @@
-"""
-Digisac Dashboard — Backend com Webhook
-"""
 import os, json
 from datetime import datetime, timezone
 from flask import Flask, jsonify, request
 from flask_cors import CORS
 from collections import defaultdict
-import sqlite3
-import threading
+import sqlite3, threading
 
 app = Flask(__name__, static_folder='static', static_url_path='')
 CORS(app)
@@ -37,7 +33,7 @@ def init_db():
             user_id TEXT,
             user_name TEXT,
             contact_name TEXT,
-            department_name TEXT,
+            department_id TEXT,
             is_open INTEGER,
             started_at TEXT,
             ended_at TEXT,
@@ -45,8 +41,6 @@ def init_db():
             waiting_time REAL,
             messaging_time REAL,
             transfer_count INTEGER,
-            raw_event TEXT,
-            created_at TEXT DEFAULT CURRENT_TIMESTAMP,
             updated_at TEXT DEFAULT CURRENT_TIMESTAMP
         )''')
         conn.execute('''CREATE TABLE IF NOT EXISTS webhook_log (
@@ -59,119 +53,111 @@ def init_db():
 
 init_db()
 
-def extract_ticket(data):
-    ticket = data.get('ticket') or data.get('data') or data
+def extract_ticket(payload):
+    # payload vem como: {"event": "ticket.created", "data": {...}}
+    ticket = payload.get('data') or payload.get('ticket') or payload
     if not ticket or not isinstance(ticket, dict):
         return None
-
     tid = ticket.get('id')
     if not tid:
         return None
 
     metrics = ticket.get('metrics') or {}
-    user = ticket.get('user') or {}
     contact = ticket.get('contact') or {}
-    department = ticket.get('department') or {}
 
-    user_id   = ticket.get('userId') or user.get('id', '')
-    user_name = ticket.get('userName') or user.get('name', '')
-    if not user_name and user_id in CONSULTORES:
-        user_name = CONSULTORES[user_id]
+    user_id   = ticket.get('userId') or ''
+    user_name = CONSULTORES.get(user_id, '')
 
     return {
-        'id':              tid,
-        'protocol':        ticket.get('protocol', ''),
-        'user_id':         user_id,
-        'user_name':       user_name,
-        'contact_name':    ticket.get('contactName') or contact.get('name', ''),
-        'department_name': ticket.get('departmentName') or department.get('name', ''),
-        'is_open':         1 if ticket.get('isOpen', True) else 0,
-        'started_at':      ticket.get('startedAt') or ticket.get('createdAt', ''),
-        'ended_at':        ticket.get('endedAt') or ticket.get('closedAt', ''),
-        'ticket_time':     (metrics.get('ticketTime') or 0) / 60,
-        'waiting_time':    (metrics.get('waitingTime') or 0) / 60,
-        'messaging_time':  (metrics.get('messagingTime') or 0) / 60,
-        'transfer_count':  metrics.get('ticketTransferCount') or 0,
+        'id':            tid,
+        'protocol':      ticket.get('protocol', ''),
+        'user_id':       user_id,
+        'user_name':     user_name,
+        'contact_name':  ticket.get('contactName') or contact.get('name', ''),
+        'department_id': ticket.get('departmentId', ''),
+        'is_open':       1 if ticket.get('isOpen', True) else 0,
+        'started_at':    ticket.get('startedAt') or ticket.get('createdAt', ''),
+        'ended_at':      ticket.get('endedAt') or '',
+        'ticket_time':   (metrics.get('ticketTime') or 0) / 60,
+        'waiting_time':  (metrics.get('waitingTime') or 0) / 60,
+        'messaging_time':(metrics.get('messagingTime') or 0) / 60,
+        'transfer_count':metrics.get('ticketTransferCount') or 0,
     }
 
 def upsert_ticket(t):
     with db_lock:
         with get_db() as conn:
             conn.execute('''INSERT INTO tickets
-                (id, protocol, user_id, user_name, contact_name, department_name,
+                (id, protocol, user_id, user_name, contact_name, department_id,
                  is_open, started_at, ended_at, ticket_time, waiting_time,
                  messaging_time, transfer_count, updated_at)
                 VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,CURRENT_TIMESTAMP)
                 ON CONFLICT(id) DO UPDATE SET
+                    user_id=CASE WHEN excluded.user_id!='' THEN excluded.user_id ELSE user_id END,
+                    user_name=CASE WHEN excluded.user_name!='' THEN excluded.user_name ELSE user_name END,
                     is_open=excluded.is_open,
-                    ended_at=excluded.ended_at,
-                    ticket_time=excluded.ticket_time,
-                    waiting_time=excluded.waiting_time,
-                    messaging_time=excluded.messaging_time,
+                    ended_at=CASE WHEN excluded.ended_at!='' THEN excluded.ended_at ELSE ended_at END,
+                    ticket_time=CASE WHEN excluded.ticket_time>0 THEN excluded.ticket_time ELSE ticket_time END,
+                    waiting_time=CASE WHEN excluded.waiting_time>0 THEN excluded.waiting_time ELSE waiting_time END,
+                    messaging_time=CASE WHEN excluded.messaging_time>0 THEN excluded.messaging_time ELSE messaging_time END,
                     transfer_count=excluded.transfer_count,
                     updated_at=CURRENT_TIMESTAMP
             ''', (t['id'], t['protocol'], t['user_id'], t['user_name'],
-                  t['contact_name'], t['department_name'], t['is_open'],
+                  t['contact_name'], t['department_id'], t['is_open'],
                   t['started_at'], t['ended_at'], t['ticket_time'],
                   t['waiting_time'], t['messaging_time'], t['transfer_count']))
             conn.commit()
 
-# ── Webhook endpoint ────────────────────────────────────────────────────────
 @app.route('/webhook', methods=['POST'])
 def webhook():
     try:
-        payload = request.get_json(force=True, silent=True) or {}
+        payload    = request.get_json(force=True, silent=True) or {}
         event_type = payload.get('event') or payload.get('type') or 'unknown'
 
-        # loga o evento
         with db_lock:
             with get_db() as conn:
                 conn.execute('INSERT INTO webhook_log (event_type, payload) VALUES (?,?)',
                              (event_type, json.dumps(payload)))
                 conn.commit()
 
-        # processa ticket
         t = extract_ticket(payload)
-        if t and t['user_id'] in CONSULTORES:
+        if t:
+            # salva todos os tickets (mesmo sem userId ainda) para atualizar depois
             upsert_ticket(t)
 
         return jsonify({'ok': True}), 200
     except Exception as e:
         return jsonify({'ok': False, 'error': str(e)}), 200
 
-# ── API de dados ────────────────────────────────────────────────────────────
 @app.route('/api/data')
 def data():
-    date_from = request.args.get('from', '2026-03-01')
-    date_to   = request.args.get('to',   '2026-03-31')
-
-    date_from_dt = date_from + 'T00:00:00'
-    date_to_dt   = date_to   + 'T23:59:59'
+    date_from = request.args.get('from', '2026-04-01')
+    date_to   = request.args.get('to',   '2026-04-30')
+    df = date_from + 'T00:00:00'
+    dt = date_to   + 'T23:59:59'
 
     with get_db() as conn:
+        # tickets dos consultores no período
         rows = conn.execute('''
             SELECT * FROM tickets
             WHERE started_at >= ? AND started_at <= ?
             AND user_id IN ({})
         '''.format(','.join('?'*len(CONSULTORES))),
-        [date_from_dt, date_to_dt] + list(CONSULTORES.keys())).fetchall()
+        [df, dt] + list(CONSULTORES.keys())).fetchall()
 
     tickets = [dict(r) for r in rows]
 
-    # agrupa por consultor
     stats = {}
     for uid, nome in CONSULTORES.items():
         stats[nome] = {
-            'nome': nome,
-            'open': 0, 'closed': 0, 'total': 0,
+            'nome': nome, 'open': 0, 'closed': 0, 'total': 0,
             'ticket_times': [], 'waiting_times': [],
             'messaging_times': [], 'transfers': [],
             'daily': defaultdict(int),
         }
 
     for t in tickets:
-        uid  = t['user_id']
-        nome = CONSULTORES.get(uid)
+        nome = CONSULTORES.get(t['user_id'])
         if not nome: continue
         s = stats[nome]
         if t['is_open']:
@@ -181,8 +167,7 @@ def data():
             if t['ticket_time']:    s['ticket_times'].append(t['ticket_time'])
             if t['waiting_time']:   s['waiting_times'].append(t['waiting_time'])
             if t['messaging_time']: s['messaging_times'].append(t['messaging_time'])
-            if t['transfer_count'] is not None:
-                s['transfers'].append(t['transfer_count'])
+            s['transfers'].append(t['transfer_count'] or 0)
         s['total'] += 1
         day = (t['started_at'] or '')[:10]
         if day: s['daily'][day] += 1
@@ -192,30 +177,26 @@ def data():
     result = []
     for nome, s in stats.items():
         result.append({
-            'nome':               nome,
-            'open':               s['open'],
-            'closed':             s['closed'],
-            'total':              s['total'],
+            'nome': nome,
+            'open': s['open'], 'closed': s['closed'], 'total': s['total'],
             'avg_ticket_time':    avg(s['ticket_times']),
             'avg_waiting_time':   avg(s['waiting_times']),
             'avg_messaging_time': avg(s['messaging_times']),
             'avg_transfers':      avg(s['transfers']),
-            'daily':              dict(sorted(s['daily'].items())),
+            'daily': dict(sorted(s['daily'].items())),
         })
 
-    # score ranking
     max_total = max((c['total'] for c in result), default=1) or 1
     max_wait  = max((c['avg_waiting_time'] for c in result), default=1) or 1
     max_conv  = max((c['avg_messaging_time'] for c in result), default=1) or 1
     for c in result:
-        score_vol  = (c['total'] / max_total) * 40
-        score_wait = ((max_wait - c['avg_waiting_time']) / max_wait) * 35 if max_wait else 0
-        score_conv = ((max_conv - c['avg_messaging_time']) / max_conv) * 25 if max_conv else 0
-        c['score'] = round(score_vol + score_wait + score_conv, 1)
+        c['score'] = round(
+            (c['total']/max_total)*40 +
+            ((max_wait-c['avg_waiting_time'])/max_wait if max_wait else 0)*35 +
+            ((max_conv-c['avg_messaging_time'])/max_conv if max_conv else 0)*25, 1)
     result.sort(key=lambda x: -x['score'])
-    for i, c in enumerate(result): c['rank'] = i + 1
+    for i, c in enumerate(result): c['rank'] = i+1
 
-    # diário geral
     daily_all = defaultdict(int)
     for c in result:
         for day, count in c['daily'].items():
@@ -231,26 +212,30 @@ def data():
     }
 
     return jsonify({
-        'consultores': result,
-        'totais': totais,
-        'daily': [{'date': k, 'count': v} for k, v in sorted(daily_all.items())],
-        'total_stored': len(tickets),
+        'consultores': result, 'totais': totais,
+        'daily': [{'date':k,'count':v} for k,v in sorted(daily_all.items())],
         'period': {'from': date_from, 'to': date_to},
     })
 
-@app.route('/api/webhook-log')
-def webhook_log():
-    with get_db() as conn:
-        rows = conn.execute('SELECT * FROM webhook_log ORDER BY received_at DESC LIMIT 50').fetchall()
-    return jsonify([dict(r) for r in rows])
-
 @app.route('/api/stats')
-def stats():
+def api_stats():
     with get_db() as conn:
         total = conn.execute('SELECT COUNT(*) as n FROM tickets').fetchone()['n']
         logs  = conn.execute('SELECT COUNT(*) as n FROM webhook_log').fetchone()['n']
         last  = conn.execute('SELECT MAX(updated_at) as t FROM tickets').fetchone()['t']
-    return jsonify({'total_tickets': total, 'total_webhooks': logs, 'last_update': last})
+        cons  = conn.execute(
+            'SELECT COUNT(*) as n FROM tickets WHERE user_id IN ({})'.format(
+            ','.join('?'*len(CONSULTORES))), list(CONSULTORES.keys())).fetchone()['n']
+    return jsonify({'total_tickets': total, 'total_webhooks': logs,
+                    'last_update': last, 'consultor_tickets': cons})
+
+@app.route('/api/webhook-log')
+def webhook_log():
+    with get_db() as conn:
+        rows = conn.execute(
+            'SELECT id,event_type,received_at FROM webhook_log ORDER BY received_at DESC LIMIT 100'
+        ).fetchall()
+    return jsonify([dict(r) for r in rows])
 
 @app.route('/')
 def index():
@@ -258,7 +243,4 @@ def index():
         return f.read(), 200, {'Content-Type': 'text/html; charset=utf-8'}
 
 if __name__ == '__main__':
-    print("Dashboard rodando em http://localhost:5000")
-    print(f"URL do webhook para configurar no Digisac:")
-    print(f"  https://SEU-DOMINIO.onrender.com/webhook")
     app.run(debug=False, host='0.0.0.0', port=5000)
