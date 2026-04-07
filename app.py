@@ -58,41 +58,32 @@ def get_end(t):   return t.get("endedAt") or t.get("closedAt")
 def avg(lst): return round(sum(lst)/len(lst), 1) if lst else 0
 
 def load_consultant(nome, uid, date_from, date_to, is_open):
-    """Busca todos os tickets de um consultor no período paginando."""
     items, page = [], 1
     key = f"{nome}_{'open' if is_open else 'closed'}"
+    params_base = {"userId": uid, "isOpen": "true" if is_open else "false", "limit": 100}
 
     while True:
-        data = api_get("/tickets", {
-            "userId": uid,
-            "isOpen": "true" if is_open else "false",
-            "page": page,
-            "limit": 100
-        })
+        data = api_get("/tickets", {**params_base, "page": page})
         if not data: break
         batch = data.get("data", [])
         if not batch: break
 
-        total = data.get("total", 0)
-        last  = int(data.get("lastPage", 1))
+        last = int(data.get("lastPage", 1))
 
         with cache_lock:
-            cache["progress"][key] = {"loaded": page * 100, "total": total, "last_page": last}
+            cache["progress"][key] = {"loaded": page, "total": last, "last_page": last}
 
-        in_period, before_period = 0, 0
         for t in batch:
-            dt = parse_dt(get_start(t))
-            if dt is None: continue
-            if date_from <= dt <= date_to:
-                items.append(t)
-                in_period += 1
-            elif dt < date_from:
-                before_period += 1
+            s = get_start(t)
+            if not s: continue
+            try:
+                dt = datetime.fromisoformat(s.replace("Z", "+00:00"))
+                if date_from <= dt <= date_to:
+                    items.append(t)
+            except:
+                continue
 
         if page >= last: break
-        # heurística: se >80% dos tickets desta página são anteriores ao período, para
-        if before_period > 0 and in_period == 0 and before_period >= len(batch) * 0.8:
-            break
         page += 1
 
     return items
