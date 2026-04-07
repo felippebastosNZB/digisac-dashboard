@@ -3,12 +3,14 @@ from datetime import datetime, timezone
 from flask import Flask, jsonify, request
 from flask_cors import CORS
 from collections import defaultdict
-import sqlite3, threading
+import threading
+import psycopg2
+from psycopg2.extras import RealDictCursor
 
 app = Flask(__name__, static_folder='static', static_url_path='')
 CORS(app)
 
-DB_PATH = os.path.join(os.path.dirname(__file__), 'tickets.db')
+DATABASE_URL = os.environ.get('DATABASE_URL', '')
 db_lock = threading.Lock()
 
 CONSULTORES = {
@@ -21,63 +23,60 @@ CONSULTORES = {
 }
 
 def get_db():
-    conn = sqlite3.connect(DB_PATH)
-    conn.row_factory = sqlite3.Row
-    return conn
+    return psycopg2.connect(DATABASE_URL, cursor_factory=RealDictCursor)
 
 def init_db():
-    with get_db() as conn:
-        conn.execute('''CREATE TABLE IF NOT EXISTS tickets (
+    with db_lock:
+        conn = get_db()
+        cur = conn.cursor()
+        cur.execute('''CREATE TABLE IF NOT EXISTS tickets (
             id TEXT PRIMARY KEY,
             protocol TEXT,
             user_id TEXT,
             user_name TEXT,
             contact_name TEXT,
             department_id TEXT,
-            is_open INTEGER,
-            started_at TEXT,
-            ended_at TEXT,
+            is_open BOOLEAN,
+            started_at TIMESTAMPTZ,
+            ended_at TIMESTAMPTZ,
             ticket_time REAL,
             waiting_time REAL,
             messaging_time REAL,
             transfer_count INTEGER,
-            updated_at TEXT DEFAULT CURRENT_TIMESTAMP
+            updated_at TIMESTAMPTZ DEFAULT NOW()
         )''')
-        conn.execute('''CREATE TABLE IF NOT EXISTS webhook_log (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
+        cur.execute('''CREATE TABLE IF NOT EXISTS webhook_log (
+            id SERIAL PRIMARY KEY,
             event_type TEXT,
             payload TEXT,
-            received_at TEXT DEFAULT CURRENT_TIMESTAMP
+            received_at TIMESTAMPTZ DEFAULT NOW()
         )''')
         conn.commit()
+        cur.close()
+        conn.close()
 
 init_db()
 
 def extract_ticket(payload):
-    # payload vem como: {"event": "ticket.created", "data": {...}}
     ticket = payload.get('data') or payload.get('ticket') or payload
     if not ticket or not isinstance(ticket, dict):
         return None
     tid = ticket.get('id')
     if not tid:
         return None
-
     metrics = ticket.get('metrics') or {}
     contact = ticket.get('contact') or {}
-
-    user_id   = ticket.get('userId') or ''
-    user_name = CONSULTORES.get(user_id, '')
-
+    user_id = ticket.get('userId') or ''
     return {
         'id':            tid,
         'protocol':      ticket.get('protocol', ''),
         'user_id':       user_id,
-        'user_name':     user_name,
+        'user_name':     CONSULTORES.get(user_id, ''),
         'contact_name':  ticket.get('contactName') or contact.get('name', ''),
         'department_id': ticket.get('departmentId', ''),
-        'is_open':       1 if ticket.get('isOpen', True) else 0,
-        'started_at':    ticket.get('startedAt') or ticket.get('createdAt', ''),
-        'ended_at':      ticket.get('endedAt') or '',
+        'is_open':       ticket.get('isOpen', True),
+        'started_at':    ticket.get('startedAt') or ticket.get('createdAt') or None,
+        'ended_at':      ticket.get('endedAt') or None,
         'ticket_time':   (metrics.get('ticketTime') or 0) / 60,
         'waiting_time':  (metrics.get('waitingTime') or 0) / 60,
         'messaging_time':(metrics.get('messagingTime') or 0) / 60,
@@ -86,66 +85,70 @@ def extract_ticket(payload):
 
 def upsert_ticket(t):
     with db_lock:
-        with get_db() as conn:
-            conn.execute('''INSERT INTO tickets
-                (id, protocol, user_id, user_name, contact_name, department_id,
-                 is_open, started_at, ended_at, ticket_time, waiting_time,
-                 messaging_time, transfer_count, updated_at)
-                VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,CURRENT_TIMESTAMP)
-                ON CONFLICT(id) DO UPDATE SET
-                    user_id=CASE WHEN excluded.user_id!='' THEN excluded.user_id ELSE user_id END,
-                    user_name=CASE WHEN excluded.user_name!='' THEN excluded.user_name ELSE user_name END,
-                    is_open=excluded.is_open,
-                    ended_at=CASE WHEN excluded.ended_at!='' THEN excluded.ended_at ELSE ended_at END,
-                    ticket_time=CASE WHEN excluded.ticket_time>0 THEN excluded.ticket_time ELSE ticket_time END,
-                    waiting_time=CASE WHEN excluded.waiting_time>0 THEN excluded.waiting_time ELSE waiting_time END,
-                    messaging_time=CASE WHEN excluded.messaging_time>0 THEN excluded.messaging_time ELSE messaging_time END,
-                    transfer_count=excluded.transfer_count,
-                    updated_at=CURRENT_TIMESTAMP
-            ''', (t['id'], t['protocol'], t['user_id'], t['user_name'],
-                  t['contact_name'], t['department_id'], t['is_open'],
-                  t['started_at'], t['ended_at'], t['ticket_time'],
-                  t['waiting_time'], t['messaging_time'], t['transfer_count']))
-            conn.commit()
+        conn = get_db()
+        cur = conn.cursor()
+        cur.execute('''
+            INSERT INTO tickets
+              (id, protocol, user_id, user_name, contact_name, department_id,
+               is_open, started_at, ended_at, ticket_time, waiting_time,
+               messaging_time, transfer_count, updated_at)
+            VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,NOW())
+            ON CONFLICT (id) DO UPDATE SET
+              user_id       = CASE WHEN excluded.user_id != '' THEN excluded.user_id ELSE tickets.user_id END,
+              user_name     = CASE WHEN excluded.user_name != '' THEN excluded.user_name ELSE tickets.user_name END,
+              is_open       = excluded.is_open,
+              ended_at      = COALESCE(excluded.ended_at, tickets.ended_at),
+              ticket_time   = CASE WHEN excluded.ticket_time > 0 THEN excluded.ticket_time ELSE tickets.ticket_time END,
+              waiting_time  = CASE WHEN excluded.waiting_time > 0 THEN excluded.waiting_time ELSE tickets.waiting_time END,
+              messaging_time= CASE WHEN excluded.messaging_time > 0 THEN excluded.messaging_time ELSE tickets.messaging_time END,
+              transfer_count= excluded.transfer_count,
+              updated_at    = NOW()
+        ''', (t['id'], t['protocol'], t['user_id'], t['user_name'],
+              t['contact_name'], t['department_id'], t['is_open'],
+              t['started_at'], t['ended_at'], t['ticket_time'],
+              t['waiting_time'], t['messaging_time'], t['transfer_count']))
+        conn.commit()
+        cur.close()
+        conn.close()
 
 @app.route('/webhook', methods=['POST'])
 def webhook():
     try:
         payload    = request.get_json(force=True, silent=True) or {}
         event_type = payload.get('event') or payload.get('type') or 'unknown'
-
         with db_lock:
-            with get_db() as conn:
-                conn.execute('INSERT INTO webhook_log (event_type, payload) VALUES (?,?)',
-                             (event_type, json.dumps(payload)))
-                conn.commit()
-
+            conn = get_db()
+            cur  = conn.cursor()
+            cur.execute('INSERT INTO webhook_log (event_type, payload) VALUES (%s,%s)',
+                        (event_type, json.dumps(payload)))
+            conn.commit()
+            cur.close()
+            conn.close()
         t = extract_ticket(payload)
         if t:
-            # salva todos os tickets (mesmo sem userId ainda) para atualizar depois
             upsert_ticket(t)
-
         return jsonify({'ok': True}), 200
     except Exception as e:
         return jsonify({'ok': False, 'error': str(e)}), 200
 
 @app.route('/api/data')
 def data():
-    date_from = request.args.get('from', '2026-04-01')
-    date_to   = request.args.get('to',   '2026-04-30')
-    df = date_from + 'T00:00:00'
-    dt = date_to   + 'T23:59:59'
+    date_from = request.args.get('from', datetime.now().strftime('%Y-%m-%d'))
+    date_to   = request.args.get('to',   datetime.now().strftime('%Y-%m-%d'))
+    df = date_from + 'T00:00:00+00:00'
+    dt = date_to   + 'T23:59:59+00:00'
 
-    with get_db() as conn:
-        # tickets dos consultores no período
-        rows = conn.execute('''
-            SELECT * FROM tickets
-            WHERE started_at >= ? AND started_at <= ?
-            AND user_id IN ({})
-        '''.format(','.join('?'*len(CONSULTORES))),
-        [df, dt] + list(CONSULTORES.keys())).fetchall()
-
-    tickets = [dict(r) for r in rows]
+    conn = get_db()
+    cur  = conn.cursor()
+    placeholders = ','.join(['%s'] * len(CONSULTORES))
+    cur.execute(f'''
+        SELECT * FROM tickets
+        WHERE started_at >= %s AND started_at <= %s
+        AND user_id IN ({placeholders})
+    ''', [df, dt] + list(CONSULTORES.keys()))
+    tickets = [dict(r) for r in cur.fetchall()]
+    cur.close()
+    conn.close()
 
     stats = {}
     for uid, nome in CONSULTORES.items():
@@ -169,7 +172,7 @@ def data():
             if t['messaging_time']: s['messaging_times'].append(t['messaging_time'])
             s['transfers'].append(t['transfer_count'] or 0)
         s['total'] += 1
-        day = (t['started_at'] or '')[:10]
+        day = t['started_at'].strftime('%Y-%m-%d') if t['started_at'] else ''
         if day: s['daily'][day] += 1
 
     def avg(lst): return round(sum(lst)/len(lst), 1) if lst else 0
@@ -219,23 +222,28 @@ def data():
 
 @app.route('/api/stats')
 def api_stats():
-    with get_db() as conn:
-        total = conn.execute('SELECT COUNT(*) as n FROM tickets').fetchone()['n']
-        logs  = conn.execute('SELECT COUNT(*) as n FROM webhook_log').fetchone()['n']
-        last  = conn.execute('SELECT MAX(updated_at) as t FROM tickets').fetchone()['t']
-        cons  = conn.execute(
-            'SELECT COUNT(*) as n FROM tickets WHERE user_id IN ({})'.format(
-            ','.join('?'*len(CONSULTORES))), list(CONSULTORES.keys())).fetchone()['n']
+    conn = get_db()
+    cur  = conn.cursor()
+    cur.execute('SELECT COUNT(*) as n FROM tickets')
+    total = cur.fetchone()['n']
+    cur.execute('SELECT COUNT(*) as n FROM webhook_log')
+    logs = cur.fetchone()['n']
+    cur.execute('SELECT MAX(updated_at) as t FROM tickets')
+    last = cur.fetchone()['t']
+    cur.close()
+    conn.close()
     return jsonify({'total_tickets': total, 'total_webhooks': logs,
-                    'last_update': last, 'consultor_tickets': cons})
+                    'last_update': str(last) if last else None})
 
 @app.route('/api/webhook-log')
 def webhook_log():
-    with get_db() as conn:
-        rows = conn.execute(
-            'SELECT id,event_type,received_at FROM webhook_log ORDER BY received_at DESC LIMIT 100'
-        ).fetchall()
-    return jsonify([dict(r) for r in rows])
+    conn = get_db()
+    cur  = conn.cursor()
+    cur.execute('SELECT id,event_type,received_at FROM webhook_log ORDER BY received_at DESC LIMIT 100')
+    rows = [dict(r) for r in cur.fetchall()]
+    cur.close()
+    conn.close()
+    return jsonify(rows)
 
 @app.route('/')
 def index():
