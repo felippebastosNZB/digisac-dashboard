@@ -58,21 +58,30 @@ def get_end(t):   return t.get("endedAt") or t.get("closedAt")
 def avg(lst): return round(sum(lst)/len(lst), 1) if lst else 0
 
 def load_consultant(nome, uid, date_from, date_to, is_open):
-    items, page = [], 1
+    items = []
     key = f"{nome}_{'open' if is_open else 'closed'}"
     params_base = {"userId": uid, "isOpen": "true" if is_open else "false", "limit": 100}
 
-    while True:
+    # descobre o total de páginas
+    data = api_get("/tickets", {**params_base, "page": 1})
+    if not data: return items
+    last = int(data.get("lastPage", 1))
+
+    with cache_lock:
+        cache["progress"][key] = {"loaded": 0, "total": last, "last_page": last}
+
+    # percorre das últimas páginas para as primeiras
+    found_older = False
+    for page in range(last, 0, -1):
         data = api_get("/tickets", {**params_base, "page": page})
         if not data: break
         batch = data.get("data", [])
         if not batch: break
 
-        last = int(data.get("lastPage", 1))
-
         with cache_lock:
-            cache["progress"][key] = {"loaded": page, "total": last, "last_page": last}
+            cache["progress"][key] = {"loaded": last - page, "total": last, "last_page": last}
 
+        page_has_newer = False
         for t in batch:
             s = get_start(t)
             if not s: continue
@@ -80,11 +89,16 @@ def load_consultant(nome, uid, date_from, date_to, is_open):
                 dt = datetime.fromisoformat(s.replace("Z", "+00:00"))
                 if date_from <= dt <= date_to:
                     items.append(t)
+                elif dt > date_to:
+                    page_has_newer = True
+                elif dt < date_from:
+                    found_older = True
             except:
                 continue
 
-        if page >= last: break
-        page += 1
+        # se encontrou tickets anteriores ao período e não há mais recentes, para
+        if found_older and not page_has_newer:
+            break
 
     return items
 
