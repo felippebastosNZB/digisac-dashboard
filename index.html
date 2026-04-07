@@ -1,0 +1,457 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>NZB — Dashboard Consultores</title>
+<link href="https://fonts.googleapis.com/css2?family=DM+Serif+Display:ital@0;1&family=DM+Sans:wght@300;400;500;600&display=swap" rel="stylesheet">
+<script src="https://cdnjs.cloudflare.com/ajax/libs/Chart.js/4.4.1/chart.umd.js"></script>
+<style>
+:root {
+  --bg:        #0a0d14;
+  --bg2:       #111520;
+  --bg3:       #181d2a;
+  --border:    rgba(255,255,255,0.07);
+  --border2:   rgba(255,255,255,0.13);
+  --text:      #e8eaf2;
+  --muted:     #6b7280;
+  --accent:    #4f9eff;
+  --accent2:   #7c3aed;
+  --green:     #22c55e;
+  --amber:     #f59e0b;
+  --red:       #ef4444;
+  --gold:      #fbbf24;
+}
+*{box-sizing:border-box;margin:0;padding:0}
+body{background:var(--bg);color:var(--text);font-family:'DM Sans',sans-serif;font-size:14px;min-height:100vh}
+
+/* Header */
+.header{
+  background:var(--bg2);
+  border-bottom:1px solid var(--border);
+  padding:20px 32px;
+  display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:16px;
+}
+.logo{display:flex;align-items:baseline;gap:10px}
+.logo-title{font-family:'DM Serif Display',serif;font-size:22px;color:var(--text)}
+.logo-sub{font-size:12px;color:var(--muted);letter-spacing:0.08em;text-transform:uppercase}
+.header-right{display:flex;align-items:center;gap:12px;flex-wrap:wrap}
+.period-inputs{display:flex;align-items:center;gap:8px}
+.period-inputs input[type=date]{
+  background:var(--bg3);border:1px solid var(--border2);color:var(--text);
+  padding:7px 10px;border-radius:8px;font-size:13px;font-family:'DM Sans',sans-serif;
+}
+.period-inputs span{color:var(--muted);font-size:12px}
+.btn{
+  padding:8px 18px;border-radius:8px;font-size:13px;font-weight:500;cursor:pointer;
+  border:1px solid var(--border2);transition:all 0.2s;font-family:'DM Sans',sans-serif;
+}
+.btn-primary{background:var(--accent);color:#fff;border-color:var(--accent)}
+.btn-primary:hover{opacity:0.85}
+.btn-ghost{background:transparent;color:var(--muted)}
+.btn-ghost:hover{background:var(--bg3);color:var(--text)}
+
+/* Status bar */
+.status-bar{
+  padding:10px 32px;
+  background:var(--bg2);
+  border-bottom:1px solid var(--border);
+  display:flex;align-items:center;gap:10px;font-size:12px;color:var(--muted);
+}
+.status-dot{width:7px;height:7px;border-radius:50%;flex-shrink:0}
+.dot-idle{background:var(--muted)}
+.dot-loading{background:var(--amber);animation:pulse 1s infinite}
+.dot-ready{background:var(--green)}
+.dot-error{background:var(--red)}
+@keyframes pulse{0%,100%{opacity:1}50%{opacity:0.3}}
+.progress-bar-wrap{flex:1;max-width:300px;height:4px;background:var(--bg3);border-radius:2px;overflow:hidden}
+.progress-bar-fill{height:100%;background:var(--accent);border-radius:2px;transition:width 0.3s}
+
+/* Layout */
+.main{padding:28px 32px;max-width:1400px;margin:0 auto}
+.section-title{
+  font-size:11px;font-weight:600;letter-spacing:0.1em;text-transform:uppercase;
+  color:var(--muted);margin-bottom:16px;
+}
+
+/* Metric cards topo */
+.metrics-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(160px,1fr));gap:12px;margin-bottom:32px}
+.metric-card{
+  background:var(--bg2);border:1px solid var(--border);border-radius:12px;
+  padding:18px 20px;
+}
+.metric-label{font-size:11px;color:var(--muted);margin-bottom:8px;letter-spacing:0.04em}
+.metric-val{font-size:26px;font-weight:600;color:var(--text);line-height:1}
+.metric-unit{font-size:12px;color:var(--muted);margin-top:4px}
+
+/* Grid 2 colunas */
+.grid-2{display:grid;grid-template-columns:1fr 1fr;gap:20px;margin-bottom:20px}
+@media(max-width:900px){.grid-2{grid-template-columns:1fr}}
+
+/* Card */
+.card{
+  background:var(--bg2);border:1px solid var(--border);border-radius:14px;padding:22px 24px;
+}
+.card-title{font-size:13px;font-weight:500;color:var(--text);margin-bottom:18px;display:flex;align-items:center;gap:8px}
+
+/* Ranking */
+.rank-list{display:flex;flex-direction:column;gap:10px}
+.rank-item{
+  display:flex;align-items:center;gap:14px;
+  padding:12px 14px;border-radius:10px;
+  background:var(--bg3);border:1px solid var(--border);
+  transition:border-color 0.2s;
+}
+.rank-item:hover{border-color:var(--border2)}
+.rank-num{
+  font-family:'DM Serif Display',serif;font-size:20px;
+  width:28px;text-align:center;flex-shrink:0;
+}
+.rank-1{color:var(--gold)}
+.rank-2{color:#9ca3af}
+.rank-3{color:#b45309}
+.rank-other{color:var(--muted)}
+.rank-name{font-weight:500;flex:1;font-size:13px}
+.rank-bars{flex:2;display:flex;flex-direction:column;gap:4px}
+.rank-bar-row{display:flex;align-items:center;gap:6px;font-size:10px;color:var(--muted)}
+.rank-mini-bg{flex:1;height:5px;background:var(--bg2);border-radius:3px;overflow:hidden}
+.rank-mini-fill{height:100%;border-radius:3px}
+.rank-score{
+  font-size:16px;font-weight:600;min-width:40px;text-align:right;
+  background:linear-gradient(135deg,var(--accent),var(--accent2));
+  -webkit-background-clip:text;-webkit-text-fill-color:transparent;
+}
+
+/* Tabela consultores */
+.consultant-table{width:100%;border-collapse:collapse;font-size:13px}
+.consultant-table th{
+  text-align:left;padding:8px 12px;font-size:11px;font-weight:500;
+  color:var(--muted);letter-spacing:0.05em;border-bottom:1px solid var(--border);
+}
+.consultant-table td{
+  padding:12px 12px;border-bottom:1px solid var(--border);vertical-align:middle;
+}
+.consultant-table tr:last-child td{border-bottom:none}
+.consultant-table tr:hover td{background:var(--bg3)}
+.badge{
+  display:inline-block;padding:3px 9px;border-radius:99px;font-size:11px;font-weight:500;
+}
+.badge-green{background:rgba(34,197,94,0.12);color:var(--green)}
+.badge-amber{background:rgba(245,158,11,0.12);color:var(--amber)}
+.badge-red{background:rgba(239,68,68,0.12);color:var(--red)}
+
+/* Chart */
+.chart-wrap{position:relative;height:220px}
+
+/* Empty state */
+.empty{
+  display:flex;flex-direction:column;align-items:center;justify-content:center;
+  padding:60px 20px;color:var(--muted);text-align:center;gap:12px;
+}
+.empty-icon{font-size:32px;opacity:0.4}
+.empty-text{font-size:14px}
+.empty-sub{font-size:12px;opacity:0.6}
+</style>
+</head>
+<body>
+
+<div class="header">
+  <div class="logo">
+    <span class="logo-title">NZB Embalagens</span>
+    <span class="logo-sub">Dashboard Consultores</span>
+  </div>
+  <div class="header-right">
+    <div class="period-inputs">
+      <input type="date" id="date-from" value="2026-03-01">
+      <span>até</span>
+      <input type="date" id="date-to" value="2026-03-31">
+    </div>
+    <button class="btn btn-primary" onclick="startLoad()">Carregar dados</button>
+    <button class="btn btn-ghost" onclick="refreshData()">Atualizar</button>
+  </div>
+</div>
+
+<div class="status-bar">
+  <div class="status-dot dot-idle" id="status-dot"></div>
+  <span id="status-msg">Aguardando — clique em "Carregar dados" para iniciar</span>
+  <div class="progress-bar-wrap" id="progress-wrap" style="display:none">
+    <div class="progress-bar-fill" id="progress-fill" style="width:0%"></div>
+  </div>
+  <span id="last-updated" style="margin-left:auto"></span>
+</div>
+
+<div class="main">
+  <!-- Métricas topo -->
+  <div class="section-title">Visão geral da empresa</div>
+  <div class="metrics-grid" id="metrics-grid">
+    <div class="metric-card"><div class="metric-label">Total de tickets</div><div class="metric-val" id="m-total">—</div><div class="metric-unit">no período</div></div>
+    <div class="metric-card"><div class="metric-label">Tickets fechados</div><div class="metric-val" id="m-closed">—</div><div class="metric-unit">concluídos</div></div>
+    <div class="metric-card"><div class="metric-label">Tickets abertos</div><div class="metric-val" id="m-open">—</div><div class="metric-unit">em andamento</div></div>
+    <div class="metric-card"><div class="metric-label">T. médio de espera</div><div class="metric-val" id="m-wait">—</div><div class="metric-unit">minutos</div></div>
+    <div class="metric-card"><div class="metric-label">T. médio conversa</div><div class="metric-val" id="m-conv">—</div><div class="metric-unit">minutos</div></div>
+    <div class="metric-card"><div class="metric-label">T. médio ticket</div><div class="metric-val" id="m-ticket">—</div><div class="metric-unit">minutos (ciclo total)</div></div>
+  </div>
+
+  <!-- Ranking + Gráfico -->
+  <div class="grid-2" style="margin-bottom:20px">
+    <div class="card">
+      <div class="card-title">Ranking de performance</div>
+      <div class="rank-list" id="rank-list">
+        <div class="empty"><div class="empty-icon">◎</div><div class="empty-text">Nenhum dado carregado</div><div class="empty-sub">Selecione o período e clique em Carregar dados</div></div>
+      </div>
+    </div>
+    <div class="card">
+      <div class="card-title">Volume de atendimentos por dia</div>
+      <div class="chart-wrap"><canvas id="chart-daily"></canvas></div>
+    </div>
+  </div>
+
+  <!-- Tabela detalhada -->
+  <div class="card" style="margin-bottom:20px">
+    <div class="card-title">Detalhamento por consultor</div>
+    <div style="overflow-x:auto">
+      <table class="consultant-table" id="consultant-table">
+        <thead>
+          <tr>
+            <th>#</th><th>Consultor</th><th>Total</th><th>Abertos</th><th>Fechados</th>
+            <th>T.Espera (min)</th><th>T.Conversa (min)</th><th>T.Ticket (min)</th><th>Transferências</th><th>Status</th>
+          </tr>
+        </thead>
+        <tbody id="consultant-tbody">
+          <tr><td colspan="10" style="padding:40px;text-align:center;color:var(--muted)">Carregue os dados para visualizar</td></tr>
+        </tbody>
+      </table>
+    </div>
+  </div>
+
+  <!-- Gráfico comparativo -->
+  <div class="grid-2">
+    <div class="card">
+      <div class="card-title">Tempo médio de espera por consultor (min)</div>
+      <div class="chart-wrap"><canvas id="chart-wait"></canvas></div>
+    </div>
+    <div class="card">
+      <div class="card-title">Tempo médio de conversa por consultor (min)</div>
+      <div class="chart-wrap"><canvas id="chart-conv"></canvas></div>
+    </div>
+  </div>
+</div>
+
+<script>
+let chartDaily = null, chartWait = null, chartConv = null;
+let pollInterval = null;
+
+function fmin(m) {
+  if (!m || m === 0) return '—';
+  const h = Math.floor(m/60), mn = Math.round(m%60);
+  return h > 0 ? `${h}h ${mn}min` : `${mn}min`;
+}
+
+async function startLoad() {
+  const from = document.getElementById('date-from').value;
+  const to   = document.getElementById('date-to').value;
+  await fetch('/api/load', {
+    method: 'POST',
+    headers: {'Content-Type':'application/json'},
+    body: JSON.stringify({from: from+'T00:00:00', to: to+'T23:59:59'})
+  });
+  startPolling();
+}
+
+function startPolling() {
+  if (pollInterval) clearInterval(pollInterval);
+  pollInterval = setInterval(async () => {
+    const s = await fetch('/api/status').then(r=>r.json());
+    updateStatusBar(s);
+    if (s.status === 'ready') {
+      clearInterval(pollInterval);
+      await refreshData();
+    }
+  }, 1500);
+}
+
+function updateStatusBar(s) {
+  const dot = document.getElementById('status-dot');
+  const msg = document.getElementById('status-msg');
+  const pw  = document.getElementById('progress-wrap');
+  const pf  = document.getElementById('progress-fill');
+
+  dot.className = 'status-dot dot-' + s.status;
+
+  if (s.status === 'loading') {
+    msg.textContent = 'Carregando dados da API Digisac...';
+    pw.style.display = 'block';
+    const keys = Object.keys(s.progress || {});
+    if (keys.length) {
+      const total = keys.reduce((sum,k) => sum + (s.progress[k].last_page||0), 0);
+      const loaded = keys.reduce((sum,k) => sum + (s.progress[k].loaded/100||0), 0);
+      const pct = total > 0 ? Math.min(100, Math.round(loaded/total*100)) : 0;
+      pf.style.width = pct + '%';
+      msg.textContent = `Carregando... ${keys.length} consultores em progresso`;
+    }
+  } else if (s.status === 'ready') {
+    msg.textContent = `Dados carregados com sucesso`;
+    pw.style.display = 'none';
+    if (s.last_updated) {
+      document.getElementById('last-updated').textContent = `Atualizado: ${s.last_updated}`;
+    }
+  } else if (s.status === 'error') {
+    msg.textContent = 'Erro ao carregar dados';
+    pw.style.display = 'none';
+  } else {
+    msg.textContent = 'Aguardando — clique em "Carregar dados" para iniciar';
+    pw.style.display = 'none';
+  }
+}
+
+async function refreshData() {
+  const res = await fetch('/api/data');
+  const d   = await res.json();
+  if (!d.consultores || !d.consultores.length) return;
+
+  // métricas topo
+  const t = d.totais;
+  document.getElementById('m-total').textContent  = t.total_tickets.toLocaleString('pt-BR');
+  document.getElementById('m-closed').textContent = t.total_closed.toLocaleString('pt-BR');
+  document.getElementById('m-open').textContent   = t.total_open.toLocaleString('pt-BR');
+  document.getElementById('m-wait').textContent   = t.avg_waiting_time ? t.avg_waiting_time.toFixed(1) : '—';
+  document.getElementById('m-conv').textContent   = t.avg_messaging_time ? t.avg_messaging_time.toFixed(1) : '—';
+  document.getElementById('m-ticket').textContent = t.avg_ticket_time ? t.avg_ticket_time.toFixed(1) : '—';
+
+  // ranking
+  const rankEl = document.getElementById('rank-list');
+  rankEl.innerHTML = '';
+  const maxTotal = Math.max(...d.consultores.map(c=>c.total), 1);
+  const maxWait  = Math.max(...d.consultores.map(c=>c.avg_waiting_time||0), 1);
+  const maxConv  = Math.max(...d.consultores.map(c=>c.avg_messaging_time||0), 1);
+
+  d.consultores.forEach((c,i) => {
+    const rankCls = i===0?'rank-1':i===1?'rank-2':i===2?'rank-3':'rank-other';
+    const volPct  = Math.round(c.total/maxTotal*100);
+    const waitPct = maxWait > 0 ? Math.round((1-c.avg_waiting_time/maxWait)*100) : 0;
+    const convPct = maxConv > 0 ? Math.round((1-c.avg_messaging_time/maxConv)*100) : 0;
+    rankEl.innerHTML += `
+      <div class="rank-item">
+        <div class="rank-num ${rankCls}">${c.rank}</div>
+        <div class="rank-name">${c.nome}</div>
+        <div class="rank-bars">
+          <div class="rank-bar-row">Volume <div class="rank-mini-bg"><div class="rank-mini-fill" style="width:${volPct}%;background:#4f9eff"></div></div> ${c.total}</div>
+          <div class="rank-bar-row">Espera <div class="rank-mini-bg"><div class="rank-mini-fill" style="width:${waitPct}%;background:#22c55e"></div></div> ${c.avg_waiting_time?.toFixed(1)||'—'}min</div>
+          <div class="rank-bar-row">Conversa <div class="rank-mini-bg"><div class="rank-mini-fill" style="width:${convPct}%;background:#7c3aed"></div></div> ${c.avg_messaging_time?.toFixed(1)||'—'}min</div>
+        </div>
+        <div class="rank-score">${c.score}</div>
+      </div>`;
+  });
+
+  // tabela
+  const tbody = document.getElementById('consultant-tbody');
+  tbody.innerHTML = '';
+  d.consultores.forEach(c => {
+    const waitStatus = !c.avg_waiting_time ? 'badge-green' :
+      c.avg_waiting_time <= t.avg_waiting_time ? 'badge-green' :
+      c.avg_waiting_time <= t.avg_waiting_time * 1.3 ? 'badge-amber' : 'badge-red';
+    tbody.innerHTML += `<tr>
+      <td style="color:var(--muted);font-weight:500">${c.rank}</td>
+      <td style="font-weight:500">${c.nome}</td>
+      <td>${c.total.toLocaleString('pt-BR')}</td>
+      <td>${c.open}</td>
+      <td>${c.closed.toLocaleString('pt-BR')}</td>
+      <td><span class="badge ${waitStatus}">${c.avg_waiting_time?.toFixed(1)||'—'}</span></td>
+      <td>${c.avg_messaging_time?.toFixed(1)||'—'}</td>
+      <td>${c.avg_ticket_time?.toFixed(1)||'—'}</td>
+      <td>${c.avg_transfers?.toFixed(1)||'—'}</td>
+      <td><span class="badge ${c.open > 41 ? 'badge-red' : c.open > 30 ? 'badge-amber' : 'badge-green'}">${c.open > 41 ? 'Sobrecarga' : c.open > 20 ? 'Normal' : 'Ok'}</span></td>
+    </tr>`;
+  });
+
+  // gráfico diário
+  if (chartDaily) chartDaily.destroy();
+  const dailyCtx = document.getElementById('chart-daily').getContext('2d');
+  chartDaily = new Chart(dailyCtx, {
+    type: 'bar',
+    data: {
+      labels: d.daily.map(x => x.date.slice(5)),
+      datasets: [{
+        label: 'Tickets',
+        data: d.daily.map(x => x.count),
+        backgroundColor: '#4f9eff44',
+        borderColor: '#4f9eff',
+        borderWidth: 1.5,
+        borderRadius: 3,
+      }]
+    },
+    options: {
+      responsive: true, maintainAspectRatio: false,
+      plugins: { legend: { display: false } },
+      scales: {
+        x: { ticks: { color: '#6b7280', font: { size: 10 } }, grid: { color: 'rgba(255,255,255,0.04)' } },
+        y: { ticks: { color: '#6b7280', font: { size: 10 } }, grid: { color: 'rgba(255,255,255,0.04)' } }
+      }
+    }
+  });
+
+  // gráficos de barra horizontal — espera e conversa
+  const names  = d.consultores.map(c => c.nome.split(' ')[0]);
+  const waits  = d.consultores.map(c => c.avg_waiting_time || 0);
+  const convs  = d.consultores.map(c => c.avg_messaging_time || 0);
+  const avgWaitLine = t.avg_waiting_time || 0;
+  const avgConvLine = t.avg_messaging_time || 0;
+
+  if (chartWait) chartWait.destroy();
+  chartWait = new Chart(document.getElementById('chart-wait').getContext('2d'), {
+    type: 'bar',
+    data: {
+      labels: names,
+      datasets: [{
+        data: waits,
+        backgroundColor: waits.map(w => w > avgWaitLine ? '#ef444466' : '#22c55e44'),
+        borderColor:     waits.map(w => w > avgWaitLine ? '#ef4444' : '#22c55e'),
+        borderWidth: 1.5, borderRadius: 4,
+      }]
+    },
+    options: {
+      responsive: true, maintainAspectRatio: false,
+      plugins: {
+        legend: { display: false },
+        annotation: { annotations: { line1: { type:'line', yMin: avgWaitLine, yMax: avgWaitLine, borderColor:'#f59e0b', borderWidth:1.5, borderDash:[4,4] } } }
+      },
+      scales: {
+        x: { ticks: { color:'#6b7280', font:{size:10} }, grid:{color:'rgba(255,255,255,0.04)'} },
+        y: { ticks: { color:'#6b7280', font:{size:10} }, grid:{color:'rgba(255,255,255,0.04)'} }
+      }
+    }
+  });
+
+  if (chartConv) chartConv.destroy();
+  chartConv = new Chart(document.getElementById('chart-conv').getContext('2d'), {
+    type: 'bar',
+    data: {
+      labels: names,
+      datasets: [{
+        data: convs,
+        backgroundColor: '#7c3aed44',
+        borderColor: '#7c3aed',
+        borderWidth: 1.5, borderRadius: 4,
+      }]
+    },
+    options: {
+      responsive: true, maintainAspectRatio: false,
+      plugins: { legend: { display: false } },
+      scales: {
+        x: { ticks: { color:'#6b7280', font:{size:10} }, grid:{color:'rgba(255,255,255,0.04)'} },
+        y: { ticks: { color:'#6b7280', font:{size:10} }, grid:{color:'rgba(255,255,255,0.04)'} }
+      }
+    }
+  });
+}
+
+// verifica status ao carregar
+window.addEventListener('load', async () => {
+  const s = await fetch('/api/status').then(r=>r.json()).catch(()=>({status:'idle'}));
+  updateStatusBar(s);
+  if (s.status === 'ready') await refreshData();
+  else if (s.status === 'loading') startPolling();
+});
+</script>
+</body>
+</html>
