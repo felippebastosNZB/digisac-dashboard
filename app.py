@@ -1,260 +1,264 @@
 """
-Digisac Dashboard — Backend Flask
-Instalar: pip install flask flask-cors requests
-Rodar: python app.py
+Digisac Dashboard — Backend com Webhook
 """
-
-import os
+import os, json
+from datetime import datetime, timezone
 from flask import Flask, jsonify, request
 from flask_cors import CORS
-import requests
-import threading
-import time
-from datetime import datetime, timezone, timedelta
 from collections import defaultdict
+import sqlite3
+import threading
 
 app = Flask(__name__, static_folder='static', static_url_path='')
 CORS(app)
 
-BASE_URL = "https://nzbembalagens.digisac.chat/api/v1"
-TOKEN    = "d93b455e5470d399f5e48a93952c8e10902f7cfd"
-HEADERS  = {"Authorization": f"Bearer {TOKEN}", "Content-Type": "application/json"}
+DB_PATH = os.path.join(os.path.dirname(__file__), 'tickets.db')
+db_lock = threading.Lock()
 
 CONSULTORES = {
-    "Aline Lourenço":       "17573484-0c14-4507-bb51-e8dec30e4e90",
-    "Cris Paiva":           "c525a3b3-fcb6-4097-8e81-3a4a727ab934",
-    "Glaucia Silva":        "6e6726fd-16b6-44da-af14-21e1acb654cb",
-    "Jaqueline dos Santos": "bab0e0c4-0c1e-4c6d-be3d-7d315b4a9bea",
-    "Kely Melo Soares":     "8287c130-11d7-4688-94e2-8bfe0574ca8c",
-    "Pedro Leão":           "0bda91fc-1275-4d9d-9835-37381a09a2aa",
+    "17573484-0c14-4507-bb51-e8dec30e4e90": "Aline Lourenço",
+    "c525a3b3-fcb6-4097-8e81-3a4a727ab934": "Cris Paiva",
+    "6e6726fd-16b6-44da-af14-21e1acb654cb": "Glaucia Silva",
+    "bab0e0c4-0c1e-4c6d-be3d-7d315b4a9bea": "Jaqueline dos Santos",
+    "8287c130-11d7-4688-94e2-8bfe0574ca8c": "Kely Melo Soares",
+    "0bda91fc-1275-4d9d-9835-37381a09a2aa": "Pedro Leão",
 }
 
-# Cache global
-cache = {
-    "status": "idle",          # idle | loading | ready | error
-    "progress": {},            # consultor -> {"loaded": N, "total": N}
-    "data": {},                # consultor -> stats
-    "last_updated": None,
-    "period": None,
-}
-cache_lock = threading.Lock()
+def get_db():
+    conn = sqlite3.connect(DB_PATH)
+    conn.row_factory = sqlite3.Row
+    return conn
 
-def api_get(endpoint, params):
-    try:
-        r = requests.get(f"{BASE_URL}{endpoint}", headers=HEADERS, params=params, timeout=20)
-        r.raise_for_status()
-        return r.json()
-    except Exception as e:
+def init_db():
+    with get_db() as conn:
+        conn.execute('''CREATE TABLE IF NOT EXISTS tickets (
+            id TEXT PRIMARY KEY,
+            protocol TEXT,
+            user_id TEXT,
+            user_name TEXT,
+            contact_name TEXT,
+            department_name TEXT,
+            is_open INTEGER,
+            started_at TEXT,
+            ended_at TEXT,
+            ticket_time REAL,
+            waiting_time REAL,
+            messaging_time REAL,
+            transfer_count INTEGER,
+            raw_event TEXT,
+            created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+            updated_at TEXT DEFAULT CURRENT_TIMESTAMP
+        )''')
+        conn.execute('''CREATE TABLE IF NOT EXISTS webhook_log (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            event_type TEXT,
+            payload TEXT,
+            received_at TEXT DEFAULT CURRENT_TIMESTAMP
+        )''')
+        conn.commit()
+
+init_db()
+
+def extract_ticket(data):
+    ticket = data.get('ticket') or data.get('data') or data
+    if not ticket or not isinstance(ticket, dict):
         return None
 
-def parse_dt(s):
-    if not s: return None
-    try: return datetime.fromisoformat(s.replace("Z", "+00:00"))
-    except: return None
+    tid = ticket.get('id')
+    if not tid:
+        return None
 
-def get_start(t): return t.get("startedAt") or t.get("createdAt")
-def get_end(t):   return t.get("endedAt") or t.get("closedAt")
+    metrics = ticket.get('metrics') or {}
+    user = ticket.get('user') or {}
+    contact = ticket.get('contact') or {}
+    department = ticket.get('department') or {}
 
-def avg(lst): return round(sum(lst)/len(lst), 1) if lst else 0
+    user_id   = ticket.get('userId') or user.get('id', '')
+    user_name = ticket.get('userName') or user.get('name', '')
+    if not user_name and user_id in CONSULTORES:
+        user_name = CONSULTORES[user_id]
 
-def load_consultant(nome, uid, date_from, date_to, is_open):
-    items = []
-    key = f"{nome}_{'open' if is_open else 'closed'}"
-    params_base = {"userId": uid, "isOpen": "true" if is_open else "false", "limit": 100}
-
-    # descobre o total de páginas
-    data = api_get("/tickets", {**params_base, "page": 1})
-    if not data: return items
-    last = int(data.get("lastPage", 1))
-
-    with cache_lock:
-        cache["progress"][key] = {"loaded": 0, "total": last, "last_page": last}
-
-    # percorre das últimas páginas para as primeiras
-    found_older = False
-    for page in range(last, 0, -1):
-        data = api_get("/tickets", {**params_base, "page": page})
-        if not data: break
-        batch = data.get("data", [])
-        if not batch: break
-
-        with cache_lock:
-            cache["progress"][key] = {"loaded": last - page, "total": last, "last_page": last}
-
-        page_has_newer = False
-        for t in batch:
-            s = get_start(t)
-            if not s: continue
-            try:
-                dt = datetime.fromisoformat(s.replace("Z", "+00:00"))
-                if date_from <= dt <= date_to:
-                    items.append(t)
-                elif dt > date_to:
-                    page_has_newer = True
-                elif dt < date_from:
-                    found_older = True
-            except:
-                continue
-
-        # se encontrou tickets anteriores ao período e não há mais recentes, para
-        if found_older and not page_has_newer:
-            break
-
-    return items
-
-def compute_stats(nome, t_open, t_closed, dmap):
-    ticket_times, waiting_times, messaging_times, transfers = [], [], [], []
-    queues = defaultdict(int)
-    daily_counts = defaultdict(int)
-
-    for t in t_closed:
-        m = t.get("metrics") or {}
-        if m.get("ticketTime"):    ticket_times.append(m["ticketTime"] / 60)
-        if m.get("waitingTime"):   waiting_times.append(m["waitingTime"] / 60)
-        if m.get("messagingTime"): messaging_times.append(m["messagingTime"] / 60)
-        if m.get("ticketTransferCount") is not None:
-            transfers.append(m["ticketTransferCount"])
-        dt = parse_dt(get_start(t))
-        if dt: daily_counts[dt.strftime("%Y-%m-%d")] += 1
-        did = str(t.get("departmentId",""))
-        queues[dmap.get(did, "Outro")] += 1
-
-    for t in t_open:
-        dt = parse_dt(get_start(t))
-        if dt: daily_counts[dt.strftime("%Y-%m-%d")] += 1
-        did = str(t.get("departmentId",""))
-        queues[dmap.get(did, "Outro")] += 1
-
-    total = len(t_open) + len(t_closed)
     return {
-        "nome": nome,
-        "open": len(t_open),
-        "closed": len(t_closed),
-        "total": total,
-        "avg_ticket_time":    avg(ticket_times),
-        "avg_waiting_time":   avg(waiting_times),
-        "avg_messaging_time": avg(messaging_times),
-        "avg_transfers":      avg(transfers),
-        "daily_counts":       dict(sorted(daily_counts.items())),
-        "queues":             dict(sorted(queues.items(), key=lambda x: -x[1])),
-        "top_queue":          max(queues, key=queues.get) if queues else "—",
+        'id':              tid,
+        'protocol':        ticket.get('protocol', ''),
+        'user_id':         user_id,
+        'user_name':       user_name,
+        'contact_name':    ticket.get('contactName') or contact.get('name', ''),
+        'department_name': ticket.get('departmentName') or department.get('name', ''),
+        'is_open':         1 if ticket.get('isOpen', True) else 0,
+        'started_at':      ticket.get('startedAt') or ticket.get('createdAt', ''),
+        'ended_at':        ticket.get('endedAt') or ticket.get('closedAt', ''),
+        'ticket_time':     (metrics.get('ticketTime') or 0) / 60,
+        'waiting_time':    (metrics.get('waitingTime') or 0) / 60,
+        'messaging_time':  (metrics.get('messagingTime') or 0) / 60,
+        'transfer_count':  metrics.get('ticketTransferCount') or 0,
     }
 
-def run_load(date_from_str, date_to_str):
-    """Roda em background thread."""
-    with cache_lock:
-        cache["status"] = "loading"
-        cache["progress"] = {}
-        cache["data"] = {}
-        cache["period"] = {"from": date_from_str, "to": date_to_str}
+def upsert_ticket(t):
+    with db_lock:
+        with get_db() as conn:
+            conn.execute('''INSERT INTO tickets
+                (id, protocol, user_id, user_name, contact_name, department_name,
+                 is_open, started_at, ended_at, ticket_time, waiting_time,
+                 messaging_time, transfer_count, updated_at)
+                VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,CURRENT_TIMESTAMP)
+                ON CONFLICT(id) DO UPDATE SET
+                    is_open=excluded.is_open,
+                    ended_at=excluded.ended_at,
+                    ticket_time=excluded.ticket_time,
+                    waiting_time=excluded.waiting_time,
+                    messaging_time=excluded.messaging_time,
+                    transfer_count=excluded.transfer_count,
+                    updated_at=CURRENT_TIMESTAMP
+            ''', (t['id'], t['protocol'], t['user_id'], t['user_name'],
+                  t['contact_name'], t['department_name'], t['is_open'],
+                  t['started_at'], t['ended_at'], t['ticket_time'],
+                  t['waiting_time'], t['messaging_time'], t['transfer_count']))
+            conn.commit()
 
+# ── Webhook endpoint ────────────────────────────────────────────────────────
+@app.route('/webhook', methods=['POST'])
+def webhook():
     try:
-        date_from = datetime.fromisoformat(date_from_str).replace(tzinfo=timezone.utc)
-        date_to   = datetime.fromisoformat(date_to_str).replace(tzinfo=timezone.utc)
+        payload = request.get_json(force=True, silent=True) or {}
+        event_type = payload.get('event') or payload.get('type') or 'unknown'
 
-        # departamentos
-        ddata = api_get("/departments", {"limit": 100})
-        dmap  = {str(d.get("id","")): d.get("name","?") for d in (ddata.get("data",[]) if ddata else [])}
+        # loga o evento
+        with db_lock:
+            with get_db() as conn:
+                conn.execute('INSERT INTO webhook_log (event_type, payload) VALUES (?,?)',
+                             (event_type, json.dumps(payload)))
+                conn.commit()
 
-        results = {}
-        for nome, uid in CONSULTORES.items():
-            t_open   = load_consultant(nome, uid, date_from, date_to, is_open=True)
-            t_closed = load_consultant(nome, uid, date_from, date_to, is_open=False)
-            results[nome] = compute_stats(nome, t_open, t_closed, dmap)
+        # processa ticket
+        t = extract_ticket(payload)
+        if t and t['user_id'] in CONSULTORES:
+            upsert_ticket(t)
 
-        with cache_lock:
-            cache["data"]         = results
-            cache["status"]       = "ready"
-            cache["last_updated"] = datetime.now().strftime("%d/%m/%Y %H:%M:%S")
-
+        return jsonify({'ok': True}), 200
     except Exception as e:
-        with cache_lock:
-            cache["status"] = "error"
-            cache["error"]  = str(e)
+        return jsonify({'ok': False, 'error': str(e)}), 200
 
-# ── API Routes ─────────────────────────────────────────────────────────────
-@app.route("/api/status")
-def status():
-    with cache_lock:
-        return jsonify({
-            "status":       cache["status"],
-            "progress":     cache["progress"],
-            "last_updated": cache["last_updated"],
-            "period":       cache["period"],
+# ── API de dados ────────────────────────────────────────────────────────────
+@app.route('/api/data')
+def data():
+    date_from = request.args.get('from', '2026-03-01')
+    date_to   = request.args.get('to',   '2026-03-31')
+
+    date_from_dt = date_from + 'T00:00:00'
+    date_to_dt   = date_to   + 'T23:59:59'
+
+    with get_db() as conn:
+        rows = conn.execute('''
+            SELECT * FROM tickets
+            WHERE started_at >= ? AND started_at <= ?
+            AND user_id IN ({})
+        '''.format(','.join('?'*len(CONSULTORES))),
+        [date_from_dt, date_to_dt] + list(CONSULTORES.keys())).fetchall()
+
+    tickets = [dict(r) for r in rows]
+
+    # agrupa por consultor
+    stats = {}
+    for uid, nome in CONSULTORES.items():
+        stats[nome] = {
+            'nome': nome,
+            'open': 0, 'closed': 0, 'total': 0,
+            'ticket_times': [], 'waiting_times': [],
+            'messaging_times': [], 'transfers': [],
+            'daily': defaultdict(int),
+        }
+
+    for t in tickets:
+        uid  = t['user_id']
+        nome = CONSULTORES.get(uid)
+        if not nome: continue
+        s = stats[nome]
+        if t['is_open']:
+            s['open'] += 1
+        else:
+            s['closed'] += 1
+            if t['ticket_time']:    s['ticket_times'].append(t['ticket_time'])
+            if t['waiting_time']:   s['waiting_times'].append(t['waiting_time'])
+            if t['messaging_time']: s['messaging_times'].append(t['messaging_time'])
+            if t['transfer_count'] is not None:
+                s['transfers'].append(t['transfer_count'])
+        s['total'] += 1
+        day = (t['started_at'] or '')[:10]
+        if day: s['daily'][day] += 1
+
+    def avg(lst): return round(sum(lst)/len(lst), 1) if lst else 0
+
+    result = []
+    for nome, s in stats.items():
+        result.append({
+            'nome':               nome,
+            'open':               s['open'],
+            'closed':             s['closed'],
+            'total':              s['total'],
+            'avg_ticket_time':    avg(s['ticket_times']),
+            'avg_waiting_time':   avg(s['waiting_times']),
+            'avg_messaging_time': avg(s['messaging_times']),
+            'avg_transfers':      avg(s['transfers']),
+            'daily':              dict(sorted(s['daily'].items())),
         })
 
-@app.route("/api/load", methods=["POST"])
-def load():
-    body      = request.json or {}
-    date_from = body.get("from", "2026-03-01T00:00:00")
-    date_to   = body.get("to",   "2026-03-31T23:59:59")
-    t = threading.Thread(target=run_load, args=(date_from, date_to), daemon=True)
-    t.start()
-    return jsonify({"ok": True})
+    # score ranking
+    max_total = max((c['total'] for c in result), default=1) or 1
+    max_wait  = max((c['avg_waiting_time'] for c in result), default=1) or 1
+    max_conv  = max((c['avg_messaging_time'] for c in result), default=1) or 1
+    for c in result:
+        score_vol  = (c['total'] / max_total) * 40
+        score_wait = ((max_wait - c['avg_waiting_time']) / max_wait) * 35 if max_wait else 0
+        score_conv = ((max_conv - c['avg_messaging_time']) / max_conv) * 25 if max_conv else 0
+        c['score'] = round(score_vol + score_wait + score_conv, 1)
+    result.sort(key=lambda x: -x['score'])
+    for i, c in enumerate(result): c['rank'] = i + 1
 
-@app.route("/api/data")
-def data():
-    with cache_lock:
-        d = cache["data"]
-        s = cache["status"]
-        lu = cache["last_updated"]
-        p  = cache["period"]
-    if not d:
-        return jsonify({"status": s, "data": {}})
+    # diário geral
+    daily_all = defaultdict(int)
+    for c in result:
+        for day, count in c['daily'].items():
+            daily_all[day] += count
 
-    consultores_list = []
-    for nome, stats in d.items():
-        consultores_list.append(stats)
-
-    # ranking: 40% total tickets + 35% tempo conversa (inverso) + 25% tempo espera (inverso)
-    max_total = max((c["total"] for c in consultores_list), default=1) or 1
-    max_conv  = max((c["avg_messaging_time"] for c in consultores_list), default=1) or 1
-    max_wait  = max((c["avg_waiting_time"] for c in consultores_list), default=1) or 1
-
-    for c in consultores_list:
-        score_vol  = (c["total"] / max_total) * 40
-        score_conv = ((max_conv - c["avg_messaging_time"]) / max_conv) * 35 if max_conv else 0
-        score_wait = ((max_wait - c["avg_waiting_time"]) / max_wait) * 25 if max_wait else 0
-        c["score"] = round(score_vol + score_conv + score_wait, 1)
-
-    consultores_list.sort(key=lambda x: -x["score"])
-    for i, c in enumerate(consultores_list):
-        c["rank"] = i + 1
-
-    # totais empresa
     totais = {
-        "total_tickets":       sum(c["total"] for c in consultores_list),
-        "total_open":          sum(c["open"] for c in consultores_list),
-        "total_closed":        sum(c["closed"] for c in consultores_list),
-        "avg_waiting_time":    avg([c["avg_waiting_time"] for c in consultores_list if c["avg_waiting_time"]]),
-        "avg_messaging_time":  avg([c["avg_messaging_time"] for c in consultores_list if c["avg_messaging_time"]]),
-        "avg_ticket_time":     avg([c["avg_ticket_time"] for c in consultores_list if c["avg_ticket_time"]]),
+        'total_tickets':      sum(c['total'] for c in result),
+        'total_open':         sum(c['open'] for c in result),
+        'total_closed':       sum(c['closed'] for c in result),
+        'avg_waiting_time':   avg([c['avg_waiting_time'] for c in result if c['avg_waiting_time']]),
+        'avg_messaging_time': avg([c['avg_messaging_time'] for c in result if c['avg_messaging_time']]),
+        'avg_ticket_time':    avg([c['avg_ticket_time'] for c in result if c['avg_ticket_time']]),
     }
 
-    # evolução diária (todos consultores juntos)
-    daily_all = defaultdict(int)
-    for c in consultores_list:
-        for day, count in c["daily_counts"].items():
-            daily_all[day] += count
-    daily_sorted = [{"date": k, "count": v} for k, v in sorted(daily_all.items())]
-
     return jsonify({
-        "status":       s,
-        "last_updated": lu,
-        "period":       p,
-        "totais":       totais,
-        "consultores":  consultores_list,
-        "daily":        daily_sorted,
+        'consultores': result,
+        'totais': totais,
+        'daily': [{'date': k, 'count': v} for k, v in sorted(daily_all.items())],
+        'total_stored': len(tickets),
+        'period': {'from': date_from, 'to': date_to},
     })
 
-@app.route("/")
+@app.route('/api/webhook-log')
+def webhook_log():
+    with get_db() as conn:
+        rows = conn.execute('SELECT * FROM webhook_log ORDER BY received_at DESC LIMIT 50').fetchall()
+    return jsonify([dict(r) for r in rows])
+
+@app.route('/api/stats')
+def stats():
+    with get_db() as conn:
+        total = conn.execute('SELECT COUNT(*) as n FROM tickets').fetchone()['n']
+        logs  = conn.execute('SELECT COUNT(*) as n FROM webhook_log').fetchone()['n']
+        last  = conn.execute('SELECT MAX(updated_at) as t FROM tickets').fetchone()['t']
+    return jsonify({'total_tickets': total, 'total_webhooks': logs, 'last_update': last})
+
+@app.route('/')
 def index():
     with open(os.path.join(os.path.dirname(__file__), 'static', 'index.html'), 'r', encoding='utf-8') as f:
         return f.read(), 200, {'Content-Type': 'text/html; charset=utf-8'}
 
-if __name__ == "__main__":
-    print("="*50)
-    print("  Digisac Dashboard rodando em:")
-    print("  http://localhost:5000")
-    print("="*50)
-    app.run(debug=False, host="0.0.0.0", port=5000)
+if __name__ == '__main__':
+    print("Dashboard rodando em http://localhost:5000")
+    print(f"URL do webhook para configurar no Digisac:")
+    print(f"  https://SEU-DOMINIO.onrender.com/webhook")
+    app.run(debug=False, host='0.0.0.0', port=5000)
