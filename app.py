@@ -4,6 +4,7 @@ Instalar: pip install flask flask-cors requests
 Rodar: python app.py
 """
 
+import os
 from flask import Flask, jsonify, request
 from flask_cors import CORS
 import requests
@@ -243,7 +244,8 @@ def data():
 
 @app.route("/")
 def index():
-    return app.send_static_file("index.html")
+    with open(os.path.join(os.path.dirname(__file__), 'static', 'index.html'), 'r', encoding='utf-8') as f:
+        return f.read(), 200, {'Content-Type': 'text/html; charset=utf-8'}
 
 if __name__ == "__main__":
     print("="*50)
